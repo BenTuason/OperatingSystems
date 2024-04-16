@@ -1,0 +1,3 @@
+R1: Hotel: Hilton, Marriott, Omni
+R2: fruit: orange, mango, pear
+R3: car: Ford, Mercedes, BMW
