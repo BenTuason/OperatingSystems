@@ -1,291 +1,403 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
-#include <sys/ipc.h>
-#include <sys/shm.h>
-#include <sys/sem.h>
+#include <semaphore.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <stdbool.h>
-#include <ctype.h>
-#include <errno.h>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <iomanip>
+#include <list>
+#include <algorithm>
 
-#define SHM_KEY 0x1234
-#define SEM_KEY 0x5678
-#define DISK_QUEUE_SIZE 100
 
-typedef struct {
-    int pid;
-    int num_pages;
-    int* tracks;
-} ProcessDiskInfo;
 
-typedef struct {
-    int total_page_frames;
-    int page_size;
-    int pages_per_process;
-    int lookahead_or_X;
-    int min_free_pool_size;
-    int max_free_pool_size;
-    int total_processes;
-    int max_track_number;
-    int disk_queue_size;
-    ProcessDiskInfo* processes;
-    int MAX_FRAMES;
-    int* frame_table;
-    int head;
-} SimulationParams;
-
-typedef struct {
-    int process_id;
-    bool read_request;
-    int frame_index;
+// Data Structures
+struct PageTableEntry {
+    int frame_number;
     int disk_address;
-} DiskRequest;
+};
 
-typedef struct {
-    DiskRequest queue[DISK_QUEUE_SIZE];
-    int front;
-    int rear;
-    int count;
-} DiskQueue;
+struct FrameTableEntry {
+    int process_id;
+    int page_number;
+    int forward_link;
+    int backward_link;
+};
 
-void freeProcessDiskInfo(ProcessDiskInfo* process) {
-    free(process->tracks);
-    process->tracks = NULL;
+struct DiskQueueEntry {
+    int process_id;
+    char operation;  // 'R' for read, 'W' for write
+    int frame_index;
+    int disk_addr;
+};
+
+struct DiskPage {
+    int pageNum;
+    int trackNum;
+};
+
+struct MemoryAddress {
+    unsigned int address;
+};
+
+struct ProcessDiskInfo {
+    int process_id;
+    int total_pages;
+    std::vector<DiskPage> pages;
+};
+
+std::unordered_map<int, std::vector<DiskPage>> diskPages;
+std::unordered_map<int, std::vector<MemoryAddress>> memoryAddresses;
+
+// Global variables
+FrameTableEntry *frame_table;
+PageTableEntry **page_tables;
+int total_frames = 0;
+int page_size = 0;
+int frames_per_process = 0;
+int lookahead_window_size = 0;
+int min_free_pool_size = 0;
+int max_free_pool_size = 0;
+int total_processes = 0;
+int max_disk_track = 0;
+int disk_queue_length = 0;
+sem_t disk_semaphore;
+int total_page_faults = 0;
+std::list<DiskQueueEntry> diskQueue;
+int current_head_position = 0;  // Track the head position for SSTF and SCAN
+sem_t queue_sem;
+
+void initializeGlobals() {
+    total_frames = 100;  // default values if not set by configuration
+    page_size = 4096;
+    frames_per_process = 5;
+    lookahead_window_size = 3;
+    min_free_pool_size = 10;
+    max_free_pool_size = 20;
+    total_processes = 3;
+    max_disk_track = 500;
+    disk_queue_length = 10;
 }
 
-void cleanupSimulationParams(SimulationParams* params) {
-    for (int i = 0; i < params->total_processes; i++) {
-        freeProcessDiskInfo(&params->processes[i]);
+// Function declarations
+void readConfiguration(const char *filename);
+void initializeSemaphores();
+void initFrameTable(int total_frames);
+void diskDriverProcess();
+void pageFaultHandler(int process_id, unsigned int page_number);
+void requestPageFromDisk(int frame_index, int disk_addr, int process_id);
+void scheduleDiskIO(DiskQueueEntry *entry);
+void startDiskOperation(char op, int memory_addr, int disk_addr);
+void pageReplacementProcess();
+void replacePage(int replacement_algorithm, int process_id);
+void processDiskRequest(const DiskQueueEntry& request);
+void fifoDiskScheduling();
+void sstfDiskScheduling();
+void scanDiskScheduling();
+int extractPageNumber(unsigned int address, int page_size);
+int findFreeFrame();
+int getDiskAddress(int process_id, int page_number);
+
+void handleConfiguration(const std::string& key, int value) {
+    // Match the key with the corresponding global variable
+    if (key == "tp") {
+        total_frames = value;
+        std::cout << "Total frames set to: " << total_frames << std::endl;
+    } else if (key == "ps") {
+        page_size = value;
+        std::cout << "Page size set to: " << page_size << " bytes" << std::endl;
+    } else if (key == "r") {
+        frames_per_process = value;
+        std::cout << "Frames per process set to: " << frames_per_process << std::endl;
+    } else if (key == "X") {
+        lookahead_window_size = value;
+        std::cout << "Lookahead window size set to: " << lookahead_window_size << std::endl;
+    } else if (key == "min") {
+        min_free_pool_size = value;
+        std::cout << "Min free pool size set to: " << min_free_pool_size << std::endl;
+    } else if (key == "max") {
+        max_free_pool_size = value;
+        std::cout << "Max free pool size set to: " << max_free_pool_size << std::endl;
+    } else if (key == "k") {
+        total_processes = value;
+        std::cout << "Total processes set to: " << total_processes << std::endl;
+    } else if (key == "maxtrack") {
+        max_disk_track = value;
+        std::cout << "Maximum disk track set to: " << max_disk_track << std::endl;
+    } else if (key == "y") {
+        disk_queue_length = value;
+        std::cout << "Disk queue length set to: " << disk_queue_length << std::endl;
+    } else {
+        std::cerr << "Unknown configuration key: " << key << std::endl;
     }
-    free(params->processes);
-    params->processes = NULL;
-    free(params->frame_table);
-    params->frame_table = NULL;
+    std::cout << "Configuration: " << key << " = " << value << std::endl;
 }
 
-void initializeSimulationParams(SimulationParams* params) {
-    params->MAX_FRAMES = 10;
-    params->frame_table = (int*) malloc(params->MAX_FRAMES * sizeof(int));
-    if (!params->frame_table) {
+void readConfiguration(const char *filename) {
+    std::ifstream file(filename);
+    std::string line;
+    int currentProcessID = 0;
+
+    if (!file) {
+        std::cerr << "Failed to open file: " << filename << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    while (getline(file, line)) {
+        std::istringstream iss(line);
+        std::string key;
+        if (line.empty()) continue;
+
+        iss >> key;
+        if (key == "tp") {
+            int value;
+            iss >> value;
+            handleConfiguration("tp", value);
+        } else if (key == "ps") {
+            int value;
+            iss >> value;
+            handleConfiguration("ps", value);
+        } else if (key == "r") {
+            int value;
+            iss >> value;
+            handleConfiguration("r", value);
+        } else if (key == "X") {
+            int value;
+            iss >> value;
+            handleConfiguration("X", value);
+        } else if (key == "min") {
+            int value;
+            iss >> value;
+            handleConfiguration("min", value);
+        } else if (key == "max") {
+            int value;
+            iss >> value;
+            handleConfiguration("max", value);
+        } else if (key == "k") {
+            int value;
+            iss >> value;
+            handleConfiguration("k", value);
+        } else if (key == "maxtrack") {
+            int value;
+            iss >> value;
+            handleConfiguration("maxtrack", value);
+        } else if (key == "y") {
+            int value;
+            iss >> value;
+            handleConfiguration("y", value);
+        } else if (key.find("pid") != std::string::npos) {
+            currentProcessID = std::stoi(key.substr(3));
+        } else if (isdigit(key[0])) {
+            int pageNum, trackNum;
+            iss >> pageNum >> trackNum;
+            diskPages[currentProcessID].push_back({pageNum, trackNum});
+        }
+    }
+
+    file.close();
+}
+
+void populateDiskQueue() {
+    for (const auto& entry : diskPages) {
+        int process_id = entry.first;
+        const std::vector<DiskPage>& pages = entry.second;
+        for (const auto& page : pages) {
+            DiskQueueEntry disk_entry;
+            disk_entry.process_id = process_id;
+            disk_entry.operation = 'R'; // Assuming read operation for simulation
+            disk_entry.disk_addr = page.trackNum; // Using trackNum as disk address
+            diskQueue.push_back(disk_entry);
+        }
+    }
+}
+
+int getDiskAddress(int process_id, int page_number) {
+    // Check if the process ID exists in the diskPages map
+    auto it = diskPages.find(process_id);
+    if (it != diskPages.end()) {
+        // Check if the page number is within bounds
+        if (page_number >= 0 && page_number < it->second.size()) {
+            // Return the disk address corresponding to the page number
+            return it->second[page_number].trackNum;
+        }
+    }
+    // If process ID or page number is invalid, return -1
+    return -1;
+}
+
+void processDiskRequest(const DiskQueueEntry& request) {
+    // Simulate disk I/O operation
+    if (request.operation == 'R') {
+        // Perform read operation from disk
+        std::cout << "Reading from disk address: " << request.disk_addr << " for process: " << request.process_id << std::endl;
+    } else if (request.operation == 'W') {
+        // Perform write operation to disk
+        std::cout << "Writing to disk address: " << request.disk_addr << " for process: " << request.process_id << std::endl;
+    } else {
+        std::cerr << "Invalid disk operation: " << request.operation << std::endl;
+    }
+    // Simulate processing time
+    usleep(1000); // Sleep for 1 millisecond
+}
+
+void fifoDiskScheduling() {
+    while (!diskQueue.empty()) {
+        processDiskRequest(diskQueue.front());
+        diskQueue.pop_front();
+    }
+}
+
+void sstfDiskScheduling() {
+    while (!diskQueue.empty()) {
+        auto closest = std::min_element(diskQueue.begin(), diskQueue.end(),
+                                        [](const DiskQueueEntry& a, const DiskQueueEntry& b) {
+                                            return abs(a.disk_addr - current_head_position) < abs(b.disk_addr - current_head_position);
+                                        });
+        processDiskRequest(*closest);
+        diskQueue.erase(closest);
+    }
+}
+
+void scanDiskScheduling() {
+    // Ensure the queue is sorted for scan (ascending or descending based on head movement)
+    diskQueue.sort([](const DiskQueueEntry& a, const DiskQueueEntry& b) { return a.disk_addr < b.disk_addr; });
+    for (auto& request : diskQueue) {
+        processDiskRequest(request);
+    }
+    diskQueue.clear();
+}
+int extractPageNumber(unsigned int address, int page_size) {
+    return (address / page_size);
+}
+int findFreeFrame() {
+    for (int i = 0; i < total_frames; ++i) {
+        if (frame_table[i].process_id == -1) {
+            return i;
+        }
+    }
+    return -1;  // No free frame available
+}
+
+void requestPageFromDisk(int frame_index, int disk_addr, int process_id) {
+    // Simulate the request for a page from disk
+    std::cout << "Requesting page from disk for process " << process_id << " at disk address " << disk_addr << " to frame " << frame_index << std::endl;
+    // Additional code to handle actual disk I/O would go here in a real system
+}
+
+int handlePageFaults() {
+    int total_page_faults = 0; // Reset page fault count for each iteration
+
+    // Iterate over the memory addresses
+    for (const auto& processEntry : memoryAddresses) {
+        int process_id = processEntry.first;
+        const std::vector<MemoryAddress>& addresses = processEntry.second;
+
+        for (const MemoryAddress& addr : addresses) {
+            int page_number = extractPageNumber(addr.address, page_size);
+
+            // Check if the page is present in the process's page table
+            PageTableEntry* pageTableEntry = &page_tables[process_id][page_number];
+            if (pageTableEntry->frame_number == -1) {
+                // Page fault
+                ++total_page_faults;
+
+                // Find a free frame
+                int free_frame = findFreeFrame();
+
+                if (free_frame == -1) {
+                    // No free frame available, invoke page replacement process
+                    sem_wait(&queue_sem);
+                    DiskQueueEntry request;
+                    request.process_id = process_id;
+                    request.operation = 'W';
+                    request.frame_index = -1;
+                    request.disk_addr = pageTableEntry->disk_address;
+                    diskQueue.push_back(request);
+                    sem_post(&queue_sem);
+                    sem_post(&disk_semaphore);
+                } else {
+                    // Update the page table entry
+                    pageTableEntry->frame_number = free_frame;
+                    frame_table[free_frame].process_id = process_id;
+                    frame_table[free_frame].page_number = page_number;
+
+                    // Schedule disk read operation
+                    requestPageFromDisk(free_frame, pageTableEntry->disk_address, process_id);
+                }
+            }
+            // Page is present, update the replacement algorithm data structures
+            // ...
+        }
+    }
+
+    return total_page_faults;
+}
+
+
+void diskDriverProcess() {
+    std::cout << "Running FIFO Disk Scheduling\n";
+    populateDiskQueue();
+    fifoDiskScheduling();
+
+    std::cout << "Running SSTF Disk Scheduling\n";
+    populateDiskQueue();
+    sstfDiskScheduling();
+
+    std::cout << "Running SCAN Disk Scheduling\n";
+    populateDiskQueue();
+    scanDiskScheduling();
+}
+
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <input file>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    initializeGlobals();  // Initialize default values
+    readConfiguration(argv[1]);  // Update values based on configuration file
+    initializeSemaphores();
+    initFrameTable(total_frames);  // Initialize frame table with total_frames
+
+    // Start disk operations in a separate process if necessary
+    pid_t pid = fork();
+    if (pid == 0) {
+        diskDriverProcess();  // Executes all disk scheduling algorithms in sequence
+        exit(0);
+    } else if (pid > 0) {
+        wait(NULL);  // Wait for the disk operations to complete
+    } else {
+        perror("Failed to fork");
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Simulation completed with %d frames of %d bytes each.\n", total_frames, page_size);
+    return 0;
+}
+
+void initializeSemaphores() {
+    if (sem_init(&disk_semaphore, 0, 1) == -1) {
+        perror("Semaphore initialization failed");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void initFrameTable(int total_frames) {
+    frame_table = (FrameTableEntry*)malloc(total_frames * sizeof(FrameTableEntry));
+    if (!frame_table) {
         perror("Failed to allocate memory for frame table");
         exit(EXIT_FAILURE);
     }
-    memset(params->frame_table, -1, params->MAX_FRAMES * sizeof(int));
-    params->head = 0;
-}
-
-void readInputFile(const char* filename, SimulationParams* params) {
-    FILE* file = fopen(filename, "r");
-    if (!file) {
-        perror("Failed to open file");
-        exit(EXIT_FAILURE);
+    for (int i = 0; i < total_frames; ++i) {
+        frame_table[i].process_id = -1;
+        frame_table[i].page_number = -1;
+        frame_table[i].forward_link = -1;
+        frame_table[i].backward_link = -1;
     }
-
-    char line[256];
-    int currentProcessIndex = -1;
-
-    while (fgets(line, sizeof(line), file)) {
-        char* pos;
-        if ((pos = strchr(line, '\n')) != NULL) *pos = '\0';
-
-        if (line[0] == '#' || line[0] == '\0') continue;
-
-        if (strncmp(line, "k ", 2) == 0) {
-            sscanf(line, "k %d", &params->total_processes);
-            params->processes = (ProcessDiskInfo*) calloc(params->total_processes, sizeof(ProcessDiskInfo));
-            if (!params->processes) {
-                perror("Failed to allocate memory for processes");
-                fclose(file);
-                exit(EXIT_FAILURE);
-            }
-        } else if (strncmp(line, "pid", 3) == 0) {
-            int pid, num_pages;
-            sscanf(line, "pid%d %d", &pid, &num_pages);
-            currentProcessIndex = pid - 1;
-            params->processes[currentProcessIndex].pid = pid;
-            params->processes[currentProcessIndex].num_pages = num_pages;
-            params->processes[currentProcessIndex].tracks = (int*) malloc(num_pages * sizeof(int));
-            if (!params->processes[currentProcessIndex].tracks) {
-                perror("Failed to allocate memory for tracks");
-                fclose(file);
-                exit(EXIT_FAILURE);
-            }
-        } else if (isdigit(line[0])) {
-            int page, track;
-            sscanf(line, "%d %d", &page, &track);
-            if (currentProcessIndex != -1 && page < params->processes[currentProcessIndex].num_pages) {
-                params->processes[currentProcessIndex].tracks[page] = track;
-            }
-        }
-    }
-
-    fclose(file);
-    printf("Configuration and process data loaded successfully.\n");
-}
-
-void handlePageFault(SimulationParams* params, int pageNumber, DiskQueue* disk_queue) {
-    printf("Handling page fault for page number %d...\n", pageNumber);
-    int found = 0;
-    for (int i = 0; i < params->MAX_FRAMES; i++) {
-        if (params->frame_table[i] == pageNumber) {
-            printf("Page %d found in frame %d (Page hit)\n", pageNumber, i);
-            found = 1;
-            break;
-        }
-    }
-    if (!found) {
-        printf("Page %d not found in any frame (Page miss). Replacing page in frame %d.\n", pageNumber, params->head);
-        params->frame_table[params->head] = pageNumber;
-        params->head = (params->head + 1) % params->MAX_FRAMES;
-
-        DiskRequest request;
-        request.process_id = getpid();
-        request.read_request = true;
-        request.frame_index = params->head;
-        request.disk_address = pageNumber * params->page_size;
-
-        if (disk_queue->count < DISK_QUEUE_SIZE) {
-            disk_queue->rear = (disk_queue->rear + 1) % DISK_QUEUE_SIZE;
-            disk_queue->queue[disk_queue->rear] = request;
-            disk_queue->count++;
-            printf("Enqueued new disk request for process %d, page %d.\n", getpid(), pageNumber);
-        } else {
-            fprintf(stderr, "Disk queue is full. Cannot enqueue page fault request.\n");
-        }
-    }
-    printf("Page fault handling completed.\n");
-}
-
-void handlePageFaultWithTimeout(SimulationParams* params, int pageNumber, DiskQueue* disk_queue) {
-    struct timeval timeout;
-    timeout.tv_sec = 5;
-    timeout.tv_usec = 0;
-
-    fd_set read_fds;
-    FD_ZERO(&read_fds);
-    FD_SET(0, &read_fds);
-
-    int result = select(1, &read_fds, NULL, NULL, &timeout);
-    if (result == -1) {
-        perror("select failed");
-        exit(EXIT_FAILURE);
-    } else if (result == 0) {
-        printf("Timeout occurred. No disk request received within 5 seconds for page %d.\n", pageNumber);
-        return;
-    }
-
-    handlePageFault(params, pageNumber, disk_queue);
-}
-
-void diskDriverProcess(int sem_id, DiskQueue *disk_queue) {
-    printf("Disk driver process started.\n");
-
-    while (true) {
-        struct sembuf sb = {0, -1, 0};
-        semop(sem_id, &sb, 1);
-
-        if (disk_queue->count > 0) {
-            DiskRequest request = disk_queue->queue[disk_queue->front];
-            printf("Processing disk request: Process ID %d, Frame Index %d, Disk Address %d\n",
-                   request.process_id, request.frame_index, request.disk_address);
-            sleep(1);
-
-            sb.sem_op = 1;
-            semop(sem_id, &sb, 1);
-
-            disk_queue->front = (disk_queue->front + 1) % DISK_QUEUE_SIZE;
-            disk_queue->count--;
-            printf("Processed disk request, %d requests remaining.\n", disk_queue->count);
-        } else {
-            printf("Disk queue is empty. Waiting for requests...\n");
-        }
-
-        if (disk_queue->count == 0) {
-            printf("No more requests in the disk queue. Exiting...\n");
-            break;
-        }
-    }
-}
-
-void childProcess(SimulationParams *params, DiskQueue* disk_queue, int process_id) {
-    printf("Child process %d running, ready to handle page faults...\n", process_id);
-    bool found = false;
-
-    for (int i = 0; i < params->total_processes; i++) {
-        if (params->processes[i].pid == process_id) {
-            found = true;
-            ProcessDiskInfo process = params->processes[i];
-            printf("Found process %d with %d pages.\n", process_id, process.num_pages);
-            for (int j = 0; j < process.num_pages; j++) {
-                printf("Request to access page %d for process %d on track %d\n", j, process_id, process.tracks[j]);
-                handlePageFaultWithTimeout(params, process.tracks[j], disk_queue);
-                sleep(1);
-            }
-            printf("All page requests processed for process %d, child process %d exiting...\n", process_id, getpid());
-            exit(0);
-        }
-    }
-    if (!found) {
-        fprintf(stderr, "Process ID %d not found in initialization list.\n", process_id);
-        exit(EXIT_FAILURE);
-    }
-}
-
-int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s input_filename\n", argv[0]);
-        return EXIT_FAILURE;
-    }
-    printf("Starting main program.\n");
-
-    int shm_id = shmget(SHM_KEY, sizeof(SimulationParams), 0666 | IPC_CREAT);
-    if (shm_id == -1) {
-        perror("shmget failed");
-        return EXIT_FAILURE;
-    }
-    SimulationParams* params = (SimulationParams*) shmat(shm_id, NULL, 0);
-    if (params == (void*) -1) {
-        perror("shmat failed");
-        return EXIT_FAILURE;
-    }
-    initializeSimulationParams(params);
-
-    int sem_id = semget(SEM_KEY, 1, IPC_CREAT | 0666);
-    if (sem_id == -1) {
-        perror("semget failed");
-        cleanupSimulationParams(params);
-        shmdt(params);
-        shmctl(shm_id, IPC_RMID, NULL);
-        return EXIT_FAILURE;
-    }
-    semctl(sem_id, 0, SETVAL, 1);
-
-    readInputFile(argv[1], params);  // Fixed to ensure proper initialization
-
-    DiskQueue disk_queue;
-    disk_queue.front = 0;
-    disk_queue.rear = -1;
-    disk_queue.count = 0;
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        diskDriverProcess(sem_id, &disk_queue);
-    } else {
-        for (int i = 0; i < params->total_processes; i++) {
-            childProcess(params, &disk_queue, params->processes[i].pid);
-        }
-        int status;
-        while (wait(&status) > 0);
-
-        cleanupSimulationParams(params);
-        shmdt(params);
-        shmctl(shm_id, IPC_RMID, NULL);
-        semctl(sem_id, 0, IPC_RMID, NULL);
-        printf("Main process completed, cleanup done.\n");
-    }
-
-    return EXIT_SUCCESS;
 }
