@@ -1,4 +1,252 @@
-# OperatingSystems COSC 3360 Spring 2024 
+Ben Tuason - 2021546
+PA3
 
 
-Virtual Memory Manager with Disk Schedulers and Page Fault Handlers for Dr. Cheng's Operating Systems Course.
+
+Made and compiled in CLion
+
+This submission follows the bonus part of the assignment. (30% bonus)
+I'm submitting April 27th. (20% bonus)
+1 leftover graceday unusued (+5 points)
+This is the input format of the file. Please name the file input.txt
+When creating the input please remove the comments and any spaces in between variables.
+I've attached a sample input.txt file that you can change.
+This is just a sample input approved by Dr. Cheng (I believe he CC'd you) and I've just added descriptions for them.
+
+/* Input file for the Virtual Memory Manager Simulation */
+tp 100    /* total_number_of_page_frames (in main memory) */
+ps 4096   /* page size (in number of bytes) */
+r 5       /* number_of_page_frames_per_process */
+X 3       /* lookahead window size for OPT, X for LRU-X, 0 for others */
+min 10    /* min free pool size */
+max 20    /* max free pool size */
+k 3       /* total number of processes */
+maxtrack 500  /* largest-numbered track on the disk */
+y 10      /* number of I/O requests in the disk queue */
+
+/* Process 1 disk pages */
+pid1 50   /* process_id 1 with 50 page frames on disk */
+0 10      /* track where page 0 is stored */
+1 20
+2 30
+3 40
+4 50
+5 60
+6 70
+7 80
+8 90
+9 100
+10 110
+11 120
+12 130
+13 140
+14 150
+15 160
+16 170
+17 180
+18 190
+19 200
+20 210
+21 220
+22 230
+23 240
+24 250
+25 260
+26 270
+27 280
+28 290
+29 300
+30 310
+31 320
+32 330
+33 340
+34 350
+35 360
+36 370
+37 380
+38 390
+39 400
+40 410
+41 420
+42 430
+43 440
+44 450
+45 460
+46 470
+47 480
+48 490
+49 500
+
+/* Process 2 disk pages */
+pid2 70   /* process_id 2 with 70 page frames on disk */
+0 15
+1 25
+2 35
+3 45
+4 55
+5 65
+6 75
+7 85
+8 95
+9 105
+10 115
+11 125
+12 135
+13 145
+14 155
+15 165
+16 175
+17 185
+18 195
+19 205
+20 215
+21 225
+22 235
+23 245
+24 255
+25 265
+26 275
+27 285
+28 295
+29 305
+30 315
+31 325
+32 335
+33 345
+34 355
+35 365
+36 375
+37 385
+38 395
+39 405
+40 415
+41 425
+42 435
+43 445
+44 455
+45 465
+46 475
+47 485
+48 495
+49 505
+50 515
+51 525
+52 535
+53 545
+54 555
+55 565
+56 575
+57 585
+58 595
+59 605
+60 615
+61 625
+62 635
+63 645
+64 655
+65 665
+66 675
+67 685
+68 695
+69 705
+
+/* Process 3 disk pages */
+pid3 80   /* process_id 3 with 80 page frames on disk */
+0 40
+1 50
+2 60
+3 70
+4 80
+5 90
+6 100
+7 110
+8 120
+9 130
+10 140
+11 150
+12 160
+13 170
+14 180
+15 190
+16 200
+17 210
+18 220
+19 230
+20 240
+21 250
+22 260
+23 270
+24 280
+25 290
+26 300
+27 310
+28 320
+29 330
+30 340
+31 350
+32 360
+33 370
+34 380
+35 390
+36 400
+37 410
+38 420
+39 430
+40 440
+41 450
+42 460
+43 470
+44 480
+45 490
+46 500
+47 510
+48 520
+49 530
+50 540
+51 550
+52 560
+53 570
+54 580
+55 590
+56 600
+57 610
+58 620
+59 630
+60 640
+61 650
+62 660
+63 670
+64 680
+65 690
+66 700
+67 710
+68 720
+69 730
+70 740
+71 750
+72 760
+73 770
+74 780
+75 790
+76 800
+77 810
+78 820
+79 830
+
+/* List of process id and address pairs */
+pid1 0x000ABCD
+pid1 0x0012345
+pid2 0x000EFGH
+pid2 0x0016789
+pid3 0x000IJKL
+pid3 0x001MNOP
+1 -1     /* end of last address for process 1 */
+2 -1     /* end of last address for process 2 */
+3 -1     /* end of last address for process 3 */
+
+
+
+To run the code
+make sure the input.txt and main.cpp files are in the same directory before running it.
+compile the code: g++ main.cpp -o main
+run the code:  ./main input.txt
